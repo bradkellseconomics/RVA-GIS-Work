@@ -9,6 +9,7 @@ SCRIPTS = [
     ("geohub", "get_geohub_files.py"),
     ("servicelines", "serviceline_view_download.py"),
     ("race_ethnicity", "race_and_ethnicity.py"),
+    ("income", "download_income.py"),
 ]
 
 
@@ -64,4 +65,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

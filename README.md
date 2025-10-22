@@ -1,103 +1,59 @@
-# Richmond GIS Data Downloader & Visualizer
+# Richmond GIS: Downloads, Aggregation, and Maps
 
-Lightweight scripts to download Richmond GIS datasets, build analysis tables, and produce interactive and printable maps. Everything writes to consistent folders so the workflow is reproducible end-to-end.
+Lightweight scripts to download Richmond GIS datasets, aggregate tract data to neighborhoods, build a house‚Äëlevel master file, and produce interactive and printable maps. The workflow is modular and reproducible.
 
-## What It Does
-- Downloads datasets and stores each one in three formats under `data_raw/`:
-  - `<name>.geojson` ó canonical raw snapshot (portable, auditable)
-  - `<name>.csv` ó flat mirror with `lon/lat` (points) or `centroid_lon/centroid_lat` (polygons/lines)
-  - `<name>.geoparquet` ó fast local cache for analysis
-- Builds neighborhood-level metrics combining service-line status and race/ethnicity demographics (with tract?neighborhood areal weighting when polygons are available)
-- Generates interactive HTML maps and printable PDFs
+## Data Layout
+- `data_raw/` ‚Äî raw inputs (GeoJSON/CSV/GeoParquet) written by download scripts
+- `data_derived/` ‚Äî derived outputs (matches, neighborhood summaries)
+- `data/analysis/` ‚Äî analysis-friendly CSV/Parquet (master file, stats)
+- `outputs/interactive/` ‚Äî HTML maps
+- `outputs/presenting/` ‚Äî PDF maps
 
-## Repo Layout
-- `download_all.py` ó orchestrator to run all downloads in sequence
-- `get_geohub_files.py` ó downloads selected ArcGIS Hub datasets
-- `serviceline_view_download.py` ó downloads the Richmond ServiceLine view
-- `race_and_ethnicity.py` ó downloads layers from a published Web Map item
-- `compute_neighborhood_metrics.py` ó creates `data_derived/neighborhoods_enriched.*` from raw layers
-- `present_all_maps.py` ó generates all interactive HTML maps (+ index page)
-- `present_interactive_maps.py` ó core interactive maps (neighborhoods, HS zones, service lines, tracts)
-- `present_neighborhoods_enriched.py` ó choropleths from the enriched neighborhoods file
-- `presenting.py` ó printable PDF maps of core layers
-- `data_raw/` ó raw outputs (ignored by Git)
-- `data_derived/` ó derived/enriched outputs
-- `outputs/interactive/` ó HTML maps
-- `outputs/presenting/` ó PDF maps
+## Scripts
+- Downloads
+  - `download_all.py` ‚Äî orchestrator (GeoHub layers, service lines, race/ethnicity, income)
+  - `get_geohub_files.py` ‚Äî selected ArcGIS Hub datasets (e.g., neighborhoods, HS zones)
+  - `serviceline_view_download.py` ‚Äî Richmond ServiceLine view (houses)
+  - `race_and_ethnicity.py` ‚Äî race/ethnicity layers (tracts)
+  - `download_income.py` ‚Äî income layers (tracts)
+- Tract‚ÜíNeighborhood aggregation (recommended path)
+  - `merge_tracts_to_neighborhoods.py` ‚Äî builds tract‚Üîneighborhood matches via overlay, writes:
+    - `data_derived/nbh_tract_matches_race.csv`
+    - `data_derived/nbh_tract_matches_income.csv`
+    - QA maps: `outputs/interactive/nbh_tract_overlay_{race|income}.html`
+  - `build_neighborhood_from_matches.py` ‚Äî computes neighborhood race (% shares) and income (weighted averages) using the match fractions, writes:
+    - `data_derived/neighborhoods_from_matches_race.{csv,geoparquet}`
+    - `data_derived/neighborhoods_from_matches_income.{csv,geoparquet}`
+- House‚Äëlevel master
+  - `master_file_creation.py` ‚Äî joins service lines to neighborhoods, and directly enriches houses with tract‚Äëlevel race and income (polygon joins), writes:
+    - `data/analysis/servicelines_house_with_attributes.{csv,geoparquet}`
+- Maps
+  - `present_all_maps.py` ‚Äî generates all interactive maps (tract race/income, neighborhood from matches, core layers) and index page
+  - `presenting.py` ‚Äî printable PDFs for core layers
 
-## Data Workflow (End-to-End)
+## Workflow
+1) Download raw data
+   - `python download_all.py`
+2) Build tract‚Üîneighborhood matches + QA
+   - `python merge_tracts_to_neighborhoods.py`
+   - Inspect: `data_derived/nbh_tract_matches_{race|income}.csv` and overlay HTML in `outputs/interactive/`
+3) Build neighborhood summaries from matches
+   - `python build_neighborhood_from_matches.py`
+4) Generate HTML maps
+   - `python present_all_maps.py`
+   - Open `outputs/interactive/index.html`
+5) (Optional) Create house‚Äëlevel master file enriched with tract race/income
+   - `python master_file_creation.py`
 
-1) Download raw data (GeoJSON + CSV + GeoParquet in `data_raw/`)
-```
-python download_all.py
-```
+## Notes
+- All downloaders save three formats side‚Äëby‚Äëside in `data_raw/`: GeoJSON, CSV (with lon/lat or centroid), GeoParquet.
+- Race tracts are filtered to Richmond by attribute (GEOID/NAME) and clipped to the neighborhood union before overlay to prevent county spillover.
+- HTML maps display ‚ÄúNo data‚Äù as grey; tooltips show name + value.
 
-2) Build analysis dataset (optional, for neighborhood-level metrics)
-```
-python compute_neighborhood_metrics.py
-```
-Writes `data_derived/neighborhoods_enriched.{geojson,geoparquet,csv}` with:
-- Lead stats: pct_known_lead, pct_known_nonlead, pct_unknown
-- Race/ethnicity: pct_white, pct_black, pct_hispanic, pct_asian, pct_native (and pct_hipi when available)
-
-3) Generate interactive maps (HTML in `outputs/interactive/`)
-```
-python present_all_maps.py
-```
-Open `outputs/interactive/index.html` in your browser.
-
-4) Printable PDFs (no basemap)
-```
-python presenting.py
-```
-Outputs to `outputs/presenting/`.
-
-## Tract?Neighborhood Weighting
-- If a polygon tract layer is present (in `data_raw/` or `rva_layers/`), `compute_neighborhood_metrics.py` uses polygonñpolygon overlay in an equal-area CRS (EPSG:5070) and weights tract counts/percents by intersection area. This allows a tract to contribute proportionally to multiple neighborhoods when it spans boundaries.
-- If only a CSV (centroids) is available, it falls back to assigning tracts by centroid to neighborhoods and aggregates by counts (or weighted percents if totals exist).
-
-## Quickstart
-1) Python environment (3.9+ recommended)
-
-2) Install dependencies (minimal set):
-```
-pip install geopandas pandas requests pyarrow folium
-```
-
-If you hit binary install issues on Windows, consider using conda/mamba:
-```
-conda install -c conda-forge geopandas pyarrow requests folium
-```
-
-3) Run all downloads:
-```
-python download_all.py
-```
-
-Options:
-- Only some sources: `python download_all.py --only geohub servicelines`
-- Stop on first error: `python download_all.py --stop-on-error`
-
-## Data Output
-All files are written to `data_raw/` with sanitized, lowercase names (alphanumeric/underscore).
-
-Examples:
-- `data_raw/high_school_zones.geojson`
-- `data_raw/high_school_zones.csv`
-- `data_raw/high_school_zones.geoparquet`
-
-## Environment / Secrets
-No API keys are required for the current data sources. If you need HTTP(S) proxies, set standard environment variables before running:
-```
-set HTTP_PROXY=http://proxy:8080
-set HTTPS_PROXY=http://proxy:8080
-```
-
-An example `.env.example` is included for convenience. These scripts do not read `.env` directly; use your shell env or adapt the scripts if you prefer `python-dotenv`.
-
-## Version Control
-The `.gitignore` excludes large/derived artifacts (`data_raw/`, caches, notebook checkpoints). The repo tracks only code and configuration so itís safe to publish.
+## Install
+- pip: `pip install geopandas pandas requests pyarrow folium`
+- conda: `conda install -c conda-forge geopandas pyarrow requests folium`
 
 ## Troubleshooting
-- If race tracts render as points: ensure a polygon tract layer exists (e.g., `RVA_Race_and_Ethnicity_2020.geoparquet`). The presenters and metric builder prefer polygons when available.
-- If overlays drop features: the scripts attempt geometry repair (`buffer(0)`). Share filenames if issues persist so we can hard-wire the exact source.
+- If tract maps render as points, ensure polygon tract layers exist in `data_raw/` (e.g., `RVA_Race_and_Ethnicity_2020.geoparquet`).
+- If overlays drop features, scripts attempt geometry repair (`buffer(0)`) and use keep‚Äëgeom‚Äëtype overlays; check matches CSV + overlay HTML to diagnose.
