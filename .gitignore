@@ -21,6 +21,18 @@ outputs/*
 !outputs/.gitkeep
 rva_layers/*
 !rva_layers/.gitkeep
+data/analysis/*
+!data/analysis/.gitkeep
+data/derived/*
+!data/derived/.gitkeep
+data/regression/*
+!data/regression/.gitkeep
+data_downloads/*
+
+# CSVs and model artifacts
+*.csv
+*.joblib
+*.pkl
 
 # Common large geodata
 *.geoparquet
@@ -31,4 +43,3 @@ rva_layers/*
 *.prj
 *.cpg
 *.qgz
-
