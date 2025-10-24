@@ -348,10 +348,16 @@ def pick_income_columns(df: gpd.GeoDataFrame, name_field: Optional[str]) -> List
             continue
         if c == "geometry":
             continue
-        if pd.api.types.is_numeric_dtype(df[c]):
-            lc = str(c).lower()
-            if ("income" in lc) or ("median" in lc) or c in {"MHI", "MEDHHINC"}:
-                cols.append(c)
+        lc = str(c).lower()
+        is_income_like = ("income" in lc) or ("median" in lc) or (c in {"MHI", "MEDHHINC"})
+        if is_income_like:
+            cols.append(c)
+        elif pd.api.types.is_numeric_dtype(df[c]) and (("income" in lc) or ("median" in lc)):
+            cols.append(c)
+    # Ensure MHI/MEDHHINC are included if present even if stored as non-numeric
+    for special in ["MHI", "MEDHHINC"]:
+        if special in df.columns and special not in cols:
+            cols.append(special)
     # Fallback to any numeric if none matched; limit to first 5
     if not cols:
         cols = [c for c in df.columns if c != "geometry" and (not name_field or c != name_field) and pd.api.types.is_numeric_dtype(df[c])][:5]
@@ -661,6 +667,51 @@ def main():
         cols = pick_income_columns(income_from_matches, name_field)
         for c in cols:
             map_polygons(income_from_matches, os.path.join(args.out_dir, f"neighborhoods_matches_income_{c}.html"), name_field=name_field, color_by=c)
+
+    # Always compute MHI by simple house-weighted average from master file (row-weighted by records per neighborhood)
+    try:
+        neighborhoods_path = resolve_by_keywords(layers, ["neighborhood"]) if 'layers' in locals() else None
+        nbh_geom = load_any(neighborhoods_path) if neighborhoods_path else None
+        master_candidates = [
+            os.path.join("data", "analysis", "servicelines_house_with_attributes"),
+            os.path.join("data", "servicelines_house_with_attributes"),
+        ]
+        master = None
+        for base in master_candidates:
+            for ext in (".geoparquet", ".parquet", ".geojson", ".csv"):
+                p = base + ext
+                if os.path.exists(p):
+                    try:
+                        if ext in (".geoparquet", ".parquet"):
+                            master = gpd.read_parquet(p)
+                        elif ext == ".geojson":
+                            master = gpd.read_file(p)
+                        else:
+                            df = pd.read_csv(p, low_memory=False)
+                            master = gpd.GeoDataFrame(df, geometry=None)
+                        break
+                    except Exception:
+                        master = None
+            if master is not None:
+                break
+
+        if (master is not None) and (nbh_geom is not None) and (len(nbh_geom) > 0):
+            if ("MHI" in master.columns) and ("neighborhood_name" in master.columns):
+                s = pd.to_numeric(master["MHI"], errors="coerce")
+                dfm = master.loc[s.notna(), ["neighborhood_name"]].copy()
+                dfm["MHI"] = s[s.notna()]
+                by_nbh = dfm.groupby("neighborhood_name")["MHI"].mean().reset_index()
+
+                name_field = None
+                for c in ["Name", "NAME", "neighborhood", "Neighborhood", "neighborhood_name"]:
+                    if c in nbh_geom.columns:
+                        name_field = c
+                        break
+                if name_field is not None:
+                    g = ensure_wgs84(nbh_geom).merge(by_nbh, left_on=name_field, right_on="neighborhood_name", how="left")
+                    map_polygons(g, os.path.join(args.out_dir, "neighborhoods_matches_income_MHI.html"), name_field=name_field, color_by="MHI")
+    except Exception as e:
+        log(f"[WARN] MHI (house-weighted) map generation failed: {e}")
 
     # Bivariate: race + income together from combined file
     combined_pq = os.path.join("data_derived", "neighborhoods_from_matches_combined.geoparquet")
