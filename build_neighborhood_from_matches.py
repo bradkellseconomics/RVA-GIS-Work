@@ -99,6 +99,26 @@ def pick_income_columns(gdf: gpd.GeoDataFrame) -> List[str]:
     return cols[:12]
 
 
+def pick_weight_column(gdf: gpd.GeoDataFrame) -> Optional[str]:
+    """Pick a tract-level weight column for income weighting.
+
+    Preference: total households, else total population.
+    """
+    candidates = [
+        "Households", "HH", "HHTOTAL", "TotalHouseholds",
+        "totalE", "TOTAL", "Total", "POP", "Population", "TOTPOP",
+    ]
+    for c in candidates:
+        if c in gdf.columns and pd.api.types.is_numeric_dtype(gdf[c]):
+            return c
+    # fall back to any numeric that looks like households/pop
+    for c in gdf.columns:
+        lc = str(c).lower()
+        if ("household" in lc or lc in {"hh", "total", "pop", "population", "totpop"}) and pd.api.types.is_numeric_dtype(gdf[c]):
+            return c
+    return None
+
+
 def build_race_by_neighborhood(matches_csv: str, tracts_path: str, name_col: str) -> pd.DataFrame:
     matches = pd.read_csv(matches_csv)
     if matches.empty:
@@ -212,15 +232,37 @@ def build_income_by_neighborhood(matches_csv: str, tracts_path: str, name_col: s
     income_cols = pick_income_columns(tracts)
     if not income_cols:
         return pd.DataFrame(columns=[name_col])
+    # Try to find a weight column (households preferred)
+    wcol = pick_weight_column(tracts)
     # Normalize join keys to strings
     matches["tract_id"] = matches["tract_id"].astype(str)
     tr_join = tracts[[tract_id] + income_cols].copy()
+    if wcol and wcol in tracts.columns:
+        tr_join[wcol] = pd.to_numeric(tracts[wcol], errors="coerce")
     tr_join["__tid__"] = tr_join[tract_id].astype(str)
     df = matches.merge(tr_join.drop(columns=[tract_id]), left_on="tract_id", right_on="__tid__", how="left").drop(columns=["__tid__"])
     df = df.dropna(subset=[nb_col])
-    # Weighted average using frac_of_tract
-    grouped = df.groupby(nb_col)
-    out = grouped.apply(lambda g: pd.Series({col: (pd.to_numeric(g[col], errors="coerce").fillna(0) * pd.to_numeric(g.get("frac_of_tract", 0), errors="coerce").fillna(0)).sum() / max(pd.to_numeric(g.get("frac_of_tract", 0), errors="coerce").fillna(0).sum(), 1e-9) for col in income_cols})).reset_index()
+    # Weighted average: households/pop weights scaled by fraction-of-tract
+    f = pd.to_numeric(df.get("frac_of_tract", 0), errors="coerce").fillna(0)
+    if wcol and wcol in df.columns:
+        w = pd.to_numeric(df[wcol], errors="coerce").fillna(0) * f
+        grouped = df.assign(__w__=w).groupby(nb_col)
+        out = grouped.apply(
+            lambda g: pd.Series({
+                col: (pd.to_numeric(g[col], errors="coerce").fillna(0) * g["__w__"].fillna(0)).sum() / max(g["__w__"].fillna(0).sum(), 1e-9)
+                for col in income_cols
+            })
+        ).reset_index()
+    else:
+        # Fallback: area-fraction weighting only
+        grouped = df.groupby(nb_col)
+        out = grouped.apply(
+            lambda g: pd.Series({
+                col: (pd.to_numeric(g[col], errors="coerce").fillna(0) * pd.to_numeric(g.get("frac_of_tract", 0), errors="coerce").fillna(0)).sum() /
+                     max(pd.to_numeric(g.get("frac_of_tract", 0), errors="coerce").fillna(0).sum(), 1e-9)
+                for col in income_cols
+            })
+        ).reset_index()
     # Ensure neighborhood column name matches name_col
     if nb_col != name_col and nb_col in out.columns:
         out = out.rename(columns={nb_col: name_col})
