@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
 import geopandas as gpd
@@ -126,6 +127,14 @@ def map_service_lines(gdf: gpd.GeoDataFrame, out_html: str, max_points: int = 50
                 popup = folium.Popup("<br/>".join(parts), max_width=300)
             folium.CircleMarker(location=[y, x], radius=3, color="#1f78b4", fill=True, fill_opacity=0.6, popup=popup).add_to(mc)
 
+    # Fit view to data bounds for better centering/scale
+    try:
+        minx, miny, maxx, maxy = ensure_wgs84(g).total_bounds
+        if np.isfinite([minx, miny, maxx, maxy]).all():
+            m.fit_bounds([[miny, minx], [maxy, maxx]])
+    except Exception:
+        pass
+
     os.makedirs(os.path.dirname(out_html), exist_ok=True)
     m.save(out_html)
     log(f"[OK] Wrote map -> {out_html}")
@@ -234,12 +243,21 @@ def map_polygons(gdf: gpd.GeoDataFrame, out_html: str, name_field: Optional[str]
 
         style_function = style_fn_simple
 
-    folium.GeoJson(
+    gj = folium.GeoJson(
         g.to_json(default=str),
         name=os.path.basename(out_html),
         style_function=style_function,
         tooltip=tooltip,
-    ).add_to(m)
+    )
+    gj.add_to(m)
+
+    # Fit view to data bounds for better centering/scale
+    try:
+        minx, miny, maxx, maxy = ensure_wgs84(g).total_bounds
+        if np.isfinite([minx, miny, maxx, maxy]).all():
+            m.fit_bounds([[miny, minx], [maxy, maxx]])
+    except Exception:
+        pass
 
     os.makedirs(os.path.dirname(out_html), exist_ok=True)
     m.save(out_html)
@@ -313,12 +331,13 @@ def map_bivariate_polygons(
                 stroke = nodata_stroke
         return {"fillColor": fill, "color": stroke, "weight": 1.2, "fillOpacity": 0.7}
 
-    folium.GeoJson(
+    gj = folium.GeoJson(
         g.to_json(default=str),
         name=os.path.basename(out_html),
         style_function=style_fn,
         tooltip=tooltip,
-    ).add_to(m)
+    )
+    gj.add_to(m)
 
     # Add legends for both scales
     try:
@@ -326,6 +345,14 @@ def map_bivariate_polygons(
         income_cmap.add_to(m)
         race_cmap.caption = race_col
         race_cmap.add_to(m)
+    except Exception:
+        pass
+
+    # Fit view to data bounds for better centering/scale
+    try:
+        minx, miny, maxx, maxy = ensure_wgs84(g).total_bounds
+        if np.isfinite([minx, miny, maxx, maxy]).all():
+            m.fit_bounds([[miny, minx], [maxy, maxx]])
     except Exception:
         pass
 
@@ -375,6 +402,8 @@ def main():
     ap.add_argument("--cache-dir", default="rva_layers", help="Optional cache folder to search for polygon sources")
     ap.add_argument("--derived-dir", default="data_derived", help="Folder with derived outputs")
     ap.add_argument("--out-dir", default=os.path.join("outputs", "interactive"), help="Folder for HTML outputs")
+    ap.add_argument("--export-pdf", action="store_true", help="Also export PDFs for each generated HTML (uses Playwright or Pyppeteer)")
+    ap.add_argument("--pdf-dir", default=None, help="Optional folder for PDF outputs (default: same as --out-dir)")
     ap.add_argument("--race-col", default=None, help="Race column to color by for tracts (default: auto)")
     ap.add_argument("--max-points", type=int, default=50000, help="Max points before HeatMap for service lines")
     args = ap.parse_args()
@@ -748,6 +777,120 @@ def main():
                 f.write(f"  <li><a href='{fn}' target='_blank'>{fn}</a></li>\n")
             f.write("</ul>\n")
         log(f"[OK] Wrote index -> {index_path}")
+
+    # Optional: export PDFs for each generated HTML
+    if getattr(args, "export_pdf", False):
+        pdf_out_dir = Path(args.pdf_dir) if args.pdf_dir else Path(args.out_dir)
+        pdf_out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Helper that tries Playwright first, then Pyppeteer
+        def render_html_to_pdf(input_html: Path, output_pdf: Path) -> bool:
+            abs_uri = input_html.resolve().as_uri()
+
+            # Try Playwright (sync API)
+            try:
+                from playwright.sync_api import sync_playwright  # type: ignore
+
+                with sync_playwright() as p:
+                    browser = p.chromium.launch()
+                    vw, vh = 1600, 1000  # balanced aspect to avoid cropping
+                    page = browser.new_page(viewport={"width": vw, "height": vh})
+                    page.goto(abs_uri, wait_until="networkidle")
+                    # Nudge Leaflet to compute sizes and fit bounds
+                    try:
+                        page.evaluate("window.dispatchEvent(new Event('resize'));")
+                        page.wait_for_selector(".leaflet-pane", timeout=3000)
+                        page.evaluate(
+                            """
+                            (() => {
+                              const keys = Object.keys(window);
+                              const ids = keys.filter(k => k.startsWith('map_') && window[k] && window[k].invalidateSize && window[k].fitBounds);
+                              const m = ids.length ? window[ids[0]] : null;
+                              if (m) {
+                                m.invalidateSize(true);
+                                let gb = null;
+                                m.eachLayer(l => { if (l && l.getBounds && !gb) { const b = l.getBounds && l.getBounds(); if (b && b.isValid && b.isValid()) { gb = b; } } });
+                                if (gb) { m.fitBounds(gb, {padding: [10,10]}); }
+                              }
+                            })();
+                            """
+                        )
+                        page.wait_for_timeout(500)
+                    except Exception:
+                        pass
+                    # Match PDF size to viewport to avoid top-left cropping
+                    page.pdf(path=str(output_pdf), width=f"{vw}px", height=f"{vh}px", print_background=True,
+                             margin={"top": "0", "right": "0", "bottom": "0", "left": "0"})
+                    browser.close()
+                return True
+            except Exception as e:
+                log(f"[INFO] Playwright PDF failed for {input_html.name}: {e}")
+
+            # Fallback: Pyppeteer
+            try:
+                import asyncio  # local import to avoid global dependency
+                from pyppeteer import launch  # type: ignore
+
+                async def _render():
+                    browser = await launch(args=["--no-sandbox"])  # nosec - headless flag only
+                    page = await browser.newPage()
+                    vw, vh = 1600, 1000
+                    await page.setViewport({"width": vw, "height": vh, "deviceScaleFactor": 1})
+                    await page.goto(abs_uri, waitUntil="networkidle0")
+                    try:
+                        await page.evaluate("window.dispatchEvent(new Event('resize'));")
+                        await page.waitForSelector(".leaflet-pane", {"timeout": 3000})
+                        await page.evaluate(
+                            """
+                            (() => {
+                              const keys = Object.keys(window);
+                              const ids = keys.filter(k => k.startsWith('map_') && window[k] && window[k].invalidateSize && window[k].fitBounds);
+                              const m = ids.length ? window[ids[0]] : null;
+                              if (m) {
+                                m.invalidateSize(true);
+                                let gb = null;
+                                m.eachLayer(l => { if (l && l.getBounds && !gb) { const b = l.getBounds && l.getBounds(); if (b && b.isValid && b.isValid()) { gb = b; } } });
+                                if (gb) { m.fitBounds(gb, {padding: [10,10]}); }
+                              }
+                            })();
+                            """
+                        )
+                        await page.waitFor(500)
+                    except Exception:
+                        pass
+                    # Match PDF page to viewport to avoid cropping
+                    await page.pdf(path=str(output_pdf), printBackground=True, width=f"{vw}px", height=f"{vh}px",
+                                   margin={"top": "0", "right": "0", "bottom": "0", "left": "0"})
+                    await browser.close()
+
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                loop.run_until_complete(_render())
+                return True
+            except Exception as e:
+                log(f"[WARN] Pyppeteer PDF failed for {input_html.name}: {e}")
+                return False
+
+        # Iterate HTML files and export PDFs
+        exported = 0
+        for fn in sorted(os.listdir(args.out_dir)):
+            if not fn.endswith('.html'):
+                continue
+            if fn.lower() == 'index.html':
+                continue  # skip index
+            in_path = Path(args.out_dir) / fn
+            out_pdf = pdf_out_dir / (Path(fn).stem + ".pdf")
+            ok = render_html_to_pdf(in_path, out_pdf)
+            if ok:
+                exported += 1
+                log(f"[OK] Wrote PDF -> {out_pdf}")
+        if exported == 0:
+            log("[WARN] No PDFs exported. Install Playwright (pip install playwright; playwright install) or Pyppeteer.")
+        else:
+            log(f"[OK] Exported {exported} PDF(s) to {pdf_out_dir}")
 
 
 if __name__ == "__main__":

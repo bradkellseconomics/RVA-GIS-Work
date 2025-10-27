@@ -44,6 +44,9 @@ Lightweight scripts to download Richmond GIS datasets, aggregate tract data to n
 - Maps
   - `present_all_maps.py` - generates interactive maps (tract race/income, neighborhoods from matches, core layers) and index page
   - `presenting.py` - printable PDFs for core layers
+  - To export PDFs alongside HTMLs with `present_all_maps.py`, use `--export-pdf` and optionally `--pdf-dir` (defaults to the HTML out folder):
+    - `python present_all_maps.py --export-pdf --pdf-dir outputs/presenting`
+    - Requires Playwright or Pyppeteer. Recommended: `pip install playwright` then `playwright install`
 
 ## Workflow
 1) Download raw data
@@ -56,6 +59,8 @@ Lightweight scripts to download Richmond GIS datasets, aggregate tract data to n
 4) Generate HTML maps (core layers)
    - `python present_all_maps.py`
    - Open `outputs/interactive/index.html`
+   - Optional: also generate PDFs for each HTML (excluding index):
+     - `python present_all_maps.py --export-pdf --pdf-dir outputs/presenting`
 5) (Optional) Create house-level master file enriched with tract race/income
    - `python master_file_creation.py`
 6) (Optional) Lead imputation, mapping, and regression
@@ -73,10 +78,13 @@ Lightweight scripts to download Richmond GIS datasets, aggregate tract data to n
 - pip: `pip install geopandas pandas requests pyarrow folium branca`
 - conda: `conda install -c conda-forge geopandas pyarrow requests folium branca`
 - Optional for regression: `pip install scikit-learn statsmodels`
+ - Optional for PDF export from HTML:
+   - Playwright (recommended): `pip install playwright` then `playwright install`
+   - or Pyppeteer: `pip install pyppeteer` (Pyppeteer may auto-download Chromium on first run)
 
 ## Troubleshooting
 - If tract maps render as points, ensure polygon tract layers exist in `data_raw/` (e.g., `RVA_Race_and_Ethnicity_2020.geoparquet`).
 - If overlays drop features, scripts attempt geometry repair (`buffer(0)`) and use keep-geom-type overlays; check matches CSV + overlay HTML to diagnose.
 - If `map_imputed_lead_by_neighborhood.py` errors on imports, install `folium` and `branca`.
 - If regression scripts warn about missing packages, install `statsmodels` and `scikit-learn`.
-
+ - If PDF export logs Playwright/Pyppeteer errors, ensure one is installed and, for Playwright, that browsers are installed via `playwright install`. Folium maps load tiles from the web; PDF rendering may require network access to fetch tiles.
